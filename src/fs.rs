@@ -39,7 +39,7 @@ fn new_attr(ino: u64, kind: FileType, perm: u16, nlink: u32) -> FileAttr {
     }
 }
 
-trait Elem {
+pub trait Elem {
     fn get_attr(&self) -> &FileAttr;
     fn to_dir(&self) -> Option<&Dir> {
         None
@@ -53,9 +53,9 @@ trait Elem {
 }
 
 // we want a bunch of traits. wrap em up.
-trait DispElem: fmt::Debug + fmt::Display + Elem {}
+pub trait DispElem: fmt::Debug + fmt::Display + Elem {}
 impl<T> DispElem for T where T: fmt::Debug + fmt::Display + Elem {}
-type Kid = Arc<Mutex<Box<dyn DispElem>>>;
+pub type Kid = Arc<Mutex<Box<dyn DispElem>>>;
 
 #[derive(Debug)]
 pub struct Dir {
@@ -163,51 +163,56 @@ impl Fs {
     }
 
     // TODO: return ref not copy...
-    pub fn walk(&mut self, comps: Vec<String>) -> bool {
+    pub fn walk(&mut self, comps: Vec<String>) -> Option<Kid> {
         println!("walking {comps:?}");
         let mut parents: Vec<Kid> = Vec::new();
         let mut cur = self.root.clone();
         for comp in comps {
-            {
-                let lcur = cur.lock().unwrap();
-                println!("comp {comp} current {lcur}");
-            }
+            println!("comp {comp} current {}", cur.lock().unwrap());
             if comp.len() == 0 {
                 continue;
             }
+
             let mut next = None;
-            let mut addParent = false;
+            let mut add_parent = false;
+
+            // find out what's next under lock.
             if let Some(dir) = cur.lock().unwrap().to_dir() {
                 if comp == "." {
-                    // onwards...
+                    // keep cur...
                 } else if comp == ".." {
                     if let Some(parent) = parents.pop() {
                         next = Some(parent.clone());
                     }
                 } else if let Some(kid) = dir.kids.get(&comp) {
-                    addParent = true;
+                    add_parent = true;
                     next = Some(kid.clone());
                 } else {
                     println!("not found");
-                    return false;
+                    return None;
                 }
             } else {
                 println!("cur not dir");
-                return false;
+                return None;
             }
-            if addParent {
+
+            // move to next
+            if add_parent {
                 parents.push(cur.clone());
             }
             if let Some(next) = next {
                 cur = next;
             }
         }
-        println!("found {}", cur.lock().unwrap());
-        return true;
+        //println!("found {}", cur.lock().unwrap());
+        return Some(cur);
     }
 
-    pub fn test_walk(&mut self, path: &str) -> bool {
+    pub fn test_walk(&mut self, path: &str) -> Option<Kid> {
         let r = self.walk(split_path(path));
+        if let Some(ref kid) = r {
+            println!("got {}", kid.lock().unwrap());
+        }
         println!("");
         r
     }
