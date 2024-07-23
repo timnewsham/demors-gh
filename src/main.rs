@@ -26,7 +26,7 @@ fn main() {
     println!("args {:?}", args);
 
     //let mut fs = fs::Fs::new();
-    if false {
+    if true {
         let mut fs = fs::Fs::new_test();
         fs.test_walk("/dir1/f1");
         fs.test_walk("dir1/f1");

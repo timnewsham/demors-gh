@@ -1,6 +1,7 @@
 use fuser::{FileAttr, FileType};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 use std::time;
 
 const OWNER_UID: u32 = 0;
@@ -38,29 +39,47 @@ fn new_attr(ino: u64, kind: FileType, perm: u16, nlink: u32) -> FileAttr {
     }
 }
 
-#[derive(Debug)]
-pub enum DirMember {
-    Dir(Dir),
-    File(File),
-}
-
-impl fmt::Display for DirMember {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DirMember::Dir(dir) => write!(
-                f,
-                "Dir({:?})",
-                dir.kids.keys().cloned().collect::<Vec<String>>()
-            ),
-            DirMember::File(file) => write!(f, "File({})", file.data),
-        }
+trait Elem {
+    fn get_attr(&self) -> &FileAttr;
+    fn to_dir(&self) -> Option<&Dir> {
+        None
+    }
+    fn to_mut_dir(&mut self) -> Option<&mut Dir> {
+        None
+    }
+    fn to_file(&self) -> Option<&File> {
+        None
     }
 }
+
+// we want a bunch of traits. wrap em up.
+trait DispElem: fmt::Debug + fmt::Display + Elem {}
+impl<T> DispElem for T where T: fmt::Debug + fmt::Display + Elem {}
+type Kid = Arc<Mutex<Box<dyn DispElem>>>;
 
 #[derive(Debug)]
 pub struct Dir {
     attr: FileAttr,
-    kids: HashMap<String, DirMember>, // strictly tree, no "." or ".."
+    kids: HashMap<String, Kid>, // strictly tree, no "." or ".."
+}
+
+impl Elem for Dir {
+    fn get_attr(&self) -> &FileAttr {
+        &self.attr
+    }
+    fn to_dir(&self) -> Option<&Dir> {
+        Some(self)
+    }
+    fn to_mut_dir(&mut self) -> Option<&mut Dir> {
+        Some(self)
+    }
+}
+
+impl fmt::Display for Dir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kids = self.kids.keys().cloned().collect::<Vec<String>>();
+        write!(f, "Dir({:?})", kids)
+    }
 }
 
 impl Dir {
@@ -71,11 +90,8 @@ impl Dir {
         }
     }
 
-    fn add_dir(&mut self, name: &str, kid: Dir) {
-        self.kids.insert(name.to_string(), DirMember::Dir(kid));
-    }
-    fn add_file(&mut self, name: &str, kid: File) {
-        self.kids.insert(name.to_string(), DirMember::File(kid));
+    fn add(&mut self, name: &str, kid: Kid) {
+        self.kids.insert(name.to_string(), kid);
     }
 }
 
@@ -83,6 +99,21 @@ impl Dir {
 pub struct File {
     attr: FileAttr,
     data: String,
+}
+
+impl Elem for File {
+    fn get_attr(&self) -> &FileAttr {
+        &self.attr
+    }
+    fn to_file(&self) -> Option<&File> {
+        Some(self)
+    }
+}
+
+impl fmt::Display for File {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "File({})", self.data)
+    }
 }
 
 impl File {
@@ -97,27 +128,30 @@ impl File {
 #[derive(Debug)]
 pub struct Fs {
     inode_alloc: u64,
-    root: DirMember, // but always a dir.
+    root: Kid,
 }
 
 impl Fs {
     pub fn new() -> Self {
+        let dir: Box<dyn DispElem> = Box::new(Dir::new(1));
+        let root = Arc::new(Mutex::new(dir));
         Fs {
             inode_alloc: 1,
-            root: DirMember::Dir(Dir::new(1)),
+            root: root,
         }
     }
 
     pub fn new_test() -> Self {
         let mut fs = Self::new();
 
-        let mut d1 = Dir::new(fs.alloc_inode());
-        d1.add_file("f1", File::new(fs.alloc_inode(), "HELLO"));
-        let d2 = Dir::new(fs.alloc_inode());
+        let mut d1 = Box::new(Dir::new(fs.alloc_inode()));
+        let f1 = Box::new(File::new(fs.alloc_inode(), "HELLO"));
+        d1.add("f1", Arc::new(Mutex::new(f1)));
+        let d2 = Box::new(Dir::new(fs.alloc_inode()));
 
-        if let DirMember::Dir(ref mut dir) = fs.root {
-            dir.add_dir("dir1", d1);
-            dir.add_dir("dir2", d2);
+        if let Some(ref mut dir) = fs.root.lock().unwrap().to_mut_dir() {
+            dir.add("dir1", Arc::new(Mutex::new(d1)));
+            dir.add("dir2", Arc::new(Mutex::new(d2)));
         }
 
         fs
@@ -131,24 +165,28 @@ impl Fs {
     // TODO: return ref not copy...
     pub fn walk(&mut self, comps: Vec<String>) -> bool {
         println!("walking {comps:?}");
-        let mut parents = Vec::new();
-        let mut cur = &self.root;
+        let mut parents: Vec<Kid> = Vec::new();
+        let mut cur = self.root.clone();
         for comp in comps {
-            println!("comp {comp} current {cur}");
+            {
+                let lcur = cur.lock().unwrap();
+                println!("comp {comp} current {lcur}");
+            }
             if comp.len() == 0 {
                 continue;
             }
-            if let DirMember::Dir(dir) = cur {
+            let mut next = None;
+            let mut addParent = false;
+            if let Some(dir) = cur.lock().unwrap().to_dir() {
                 if comp == "." {
-                    continue;
+                    // onwards...
                 } else if comp == ".." {
                     if let Some(parent) = parents.pop() {
-                        cur = parent;
+                        next = Some(parent.clone());
                     }
-                    continue;
                 } else if let Some(kid) = dir.kids.get(&comp) {
-                    parents.push(cur);
-                    cur = kid;
+                    addParent = true;
+                    next = Some(kid.clone());
                 } else {
                     println!("not found");
                     return false;
@@ -157,8 +195,14 @@ impl Fs {
                 println!("cur not dir");
                 return false;
             }
+            if addParent {
+                parents.push(cur.clone());
+            }
+            if let Some(next) = next {
+                cur = next;
+            }
         }
-        println!("found {cur}");
+        println!("found {}", cur.lock().unwrap());
         return true;
     }
 
