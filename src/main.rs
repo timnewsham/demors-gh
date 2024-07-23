@@ -27,7 +27,17 @@ fn main() {
 
     //let mut fs = fs::Fs::new();
     if true {
-        let mut fs = fs::Fs::new_test();
+        let mut fs = fs::Fs::new();
+        fs.show_tree();
+
+        {
+            let d1 = fs.new_dir(fs.root(), "dir1").unwrap();
+            fs.new_dir(fs.root(), "dir2");
+            fs.new_file(d1.clone(), "f1", "HELLO");
+            fs.new_file(d1.clone(), "f2", "HI");
+            fs.show_tree();
+        }
+
         fs.test_walk("/dir1/f1");
         fs.test_walk("dir1/f1");
         fs.test_walk("/dir1/../dir2");
@@ -35,6 +45,8 @@ fn main() {
 
         fs.test_walk("/bogus");
         fs.test_walk("/dir1/f1/bogus");
+
+        fs.show_tree();
     }
 
     //println!("fs {:?}", fs);

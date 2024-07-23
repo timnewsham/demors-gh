@@ -90,8 +90,8 @@ impl Dir {
         }
     }
 
-    fn add(&mut self, name: &str, kid: Kid) {
-        self.kids.insert(name.to_string(), kid);
+    fn to_kid(self) -> Kid {
+        Arc::new(Mutex::new(Box::new(self)))
     }
 }
 
@@ -120,8 +120,12 @@ impl File {
     fn new(ino: u64, dat: &str) -> Self {
         File {
             attr: new_attr(ino, FileType::RegularFile, FILE_PERM, 1),
-            data: dat.to_string(),
+            data: dat.to_owned(),
         }
+    }
+
+    fn to_kid(self) -> Kid {
+        Arc::new(Mutex::new(Box::new(self)))
     }
 }
 
@@ -133,28 +137,10 @@ pub struct Fs {
 
 impl Fs {
     pub fn new() -> Self {
-        let dir: Box<dyn DispElem> = Box::new(Dir::new(1));
-        let root = Arc::new(Mutex::new(dir));
         Fs {
             inode_alloc: 1,
-            root: root,
+            root: Dir::new(1).to_kid(),
         }
-    }
-
-    pub fn new_test() -> Self {
-        let mut fs = Self::new();
-
-        let mut d1 = Box::new(Dir::new(fs.alloc_inode()));
-        let f1 = Box::new(File::new(fs.alloc_inode(), "HELLO"));
-        d1.add("f1", Arc::new(Mutex::new(f1)));
-        let d2 = Box::new(Dir::new(fs.alloc_inode()));
-
-        if let Some(ref mut dir) = fs.root.lock().unwrap().to_mut_dir() {
-            dir.add("dir1", Arc::new(Mutex::new(d1)));
-            dir.add("dir2", Arc::new(Mutex::new(d2)));
-        }
-
-        fs
     }
 
     fn alloc_inode(&mut self) -> u64 {
@@ -162,13 +148,32 @@ impl Fs {
         self.inode_alloc
     }
 
-    // TODO: return ref not copy...
+    pub fn root(&self) -> Kid {
+        self.root.clone()
+    }
+
+    pub fn new_file(&mut self, parent: Kid, name: &str, dat: &str) -> Option<Kid> {
+        let mut locked = parent.lock().unwrap();
+        let dir = locked.to_mut_dir()?;
+        let kid = File::new(self.alloc_inode(), dat).to_kid();
+        dir.kids.insert(name.to_owned(), kid.clone());
+        Some(kid)
+    }
+
+    pub fn new_dir(&mut self, parent: Kid, name: &str) -> Option<Kid> {
+        let mut locked = parent.lock().unwrap();
+        let dir = locked.to_mut_dir()?;
+        let kid = Dir::new(self.alloc_inode()).to_kid();
+        dir.kids.insert(name.to_owned(), kid.clone());
+        Some(kid)
+    }
+
     pub fn walk(&mut self, comps: Vec<String>) -> Option<Kid> {
-        println!("walking {comps:?}");
+        // println!("walking {comps:?}");
         let mut parents: Vec<Kid> = Vec::new();
         let mut cur = self.root.clone();
         for comp in comps {
-            println!("comp {comp} current {}", cur.lock().unwrap());
+            //println!("comp {comp} current {}", cur.lock().unwrap());
             if comp.len() == 0 {
                 continue;
             }
@@ -188,11 +193,11 @@ impl Fs {
                     add_parent = true;
                     next = Some(kid.clone());
                 } else {
-                    println!("not found");
+                    //println!("not found");
                     return None;
                 }
             } else {
-                println!("cur not dir");
+                //println!("cur not dir");
                 return None;
             }
 
@@ -209,11 +214,41 @@ impl Fs {
     }
 
     pub fn test_walk(&mut self, path: &str) -> Option<Kid> {
-        let r = self.walk(split_path(path));
+        let comps = split_path(path);
+        println!("walking {path} {comps:?}");
+        let r = self.walk(comps);
         if let Some(ref kid) = r {
             println!("got {}", kid.lock().unwrap());
         }
         println!("");
         r
+    }
+
+    pub fn show_tree(&mut self) {
+        show_tree(self.root(), ".", 0);
+    }
+}
+
+pub fn show_tree(k: Kid, name: &str, level: usize) {
+    if level == 0 {
+        println!("Tree:");
+    }
+    println!(
+        "{0:>1$}[{2}] {3}: {4}",
+        "",
+        level * 2,
+        Arc::strong_count(&k),
+        name,
+        k.lock().unwrap()
+    );
+
+    if let Some(dir) = k.lock().unwrap().to_dir() {
+        for (nm, kid) in dir.kids.iter() {
+            show_tree(kid.clone(), &nm, level + 1);
+        }
+    }
+
+    if level == 0 {
+        println!("");
     }
 }
