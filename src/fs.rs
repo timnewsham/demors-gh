@@ -252,3 +252,47 @@ pub fn show_tree(k: Kid, name: &str, level: usize) {
         println!("");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::fs::*;
+
+    #[test]
+    fn test_walk() {
+        fn get_inode(f: Kid) -> u64 {
+            f.lock().unwrap().get_attr().ino
+        }
+        fn oget_inode(of: Option<Kid>) -> Option<u64> {
+            of.map(get_inode)
+        }
+        fn walk_gives(fs: &mut Fs, path: &str, want: Kid) {
+            let want_ino = get_inode(want);
+            let targ = fs.test_walk(path);
+            assert_eq!(oget_inode(targ), Some(want_ino));
+        }
+        fn walk_fails(fs: &mut Fs, path: &str) {
+            let targ = fs.test_walk(path);
+            assert_eq!(oget_inode(targ), None);
+        }
+
+        let mut fs = Fs::new();
+        let root = fs.root();
+        let d1 = fs.new_dir(root.clone(), "dir1").unwrap();
+        let d2 = fs.new_dir(fs.root(), "dir2").unwrap();
+        let f1 = fs.new_file(d1.clone(), "f1", "file1 here").unwrap();
+        let f2 = fs.new_file(d1.clone(), "f2", "file2 here").unwrap();
+
+        assert_ne!(get_inode(f1.clone()), get_inode(f2.clone()));
+        assert_ne!(get_inode(d1.clone()), get_inode(f2.clone()));
+
+        walk_gives(&mut fs, "/dir1/f1", f1.clone());
+        walk_gives(&mut fs, "dir1/f1", f1.clone());
+        walk_gives(&mut fs, "dir1/f2", f2.clone());
+        walk_gives(&mut fs, "/dir1/../dir2", d2.clone());
+        walk_gives(&mut fs, "//dir2/.././/dir1/f1", f1.clone());
+        walk_gives(&mut fs, "//dir2/.././/dir1/../../../../../..", root.clone());
+
+        walk_fails(&mut fs, "/bogus");
+        walk_fails(&mut fs, "/dir1/f1/bogus");
+    }
+}
